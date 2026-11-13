@@ -1,0 +1,42 @@
+# TLS terminator and edge for the single-server deployment. Caddy gets and renews Let's Encrypt certificates itself.
+# SITE_ADDRESS is your domain (e.g. www.example.org); use ":80" for local testing without TLS.
+{$SITE_ADDRESS::80} {
+	encode zstd gzip
+
+	# Security headers for everything, including static files served straight from the app.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), camera=(), microphone=(), payment=(), usb=()"
+		Cross-Origin-Opener-Policy "same-origin"
+		-Server
+	}
+
+	# Fingerprinted build assets never change: cache for a year.
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+
+	# Non-fingerprinted static files (logo, favicon): cache for a day so a replacement shows up quickly.
+	@static path /epma_logo.jpg /favicon.ico
+	header @static Cache-Control "public, max-age=86400"
+
+	# Reject oversized bodies at the edge (the API caps itself at 16 KB).
+	request_body {
+		max_size 64KB
+	}
+
+	# Caddy overwrites any client-supplied X-Forwarded-For with the real client address, so the app runs with
+	# TRUSTED_PROXY_HOPS=1 and reads the rightmost entry.
+	reverse_proxy app:3000 {
+		health_uri /healthz
+		health_interval 15s
+		lb_try_duration 5s
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

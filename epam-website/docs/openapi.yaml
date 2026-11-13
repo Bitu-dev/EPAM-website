@@ -1,0 +1,386 @@
+openapi: 3.0.3
+info:
+  title: EPAM website API
+  version: 1.0.0
+  license: { name: Proprietary }
+  description: |
+    REST API served by the same Node process as the website (same origin, so no CORS in production).
+    Every response, success or failure, uses the same envelope. Browser clients authenticate with a short-lived
+    Bearer access token plus an httpOnly refresh cookie.
+servers:
+  - url: /api/v1
+tags:
+  - { name: Public, description: Open to everyone (rate-limited) }
+  - { name: Auth, description: Sign-in and session management for staff }
+  - { name: Admin, description: Inquiry inbox for signed-in staff }
+paths:
+  /inquiries:
+    post:
+      tags: [Public]
+      summary: Submit a contact, partner or support inquiry
+      description: Rate-limited per client IP (default 5 per 10 minutes). Unknown fields are rejected.
+      operationId: submitInquiry
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SubmitInquiry" }
+      responses:
+        "201":
+          {
+            description: Received,
+            content:
+              { application/json: { schema: { $ref: "#/components/schemas/ReceiptEnvelope" } } },
+          }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "403": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Sign in
+      description: Requires the header `X-Requested-With`. Sets the httpOnly refresh cookie `epam_rt`. 5 failures in 15 minutes from one (email, IP) pair locks that pair out.
+      operationId: login
+      security: []
+      parameters: [{ $ref: "#/components/parameters/XRequestedWith" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          {
+            description: Signed in,
+            headers:
+              { Set-Cookie: { schema: { type: string }, description: "epam_rt refresh cookie" } },
+            content:
+              { application/json: { schema: { $ref: "#/components/schemas/AuthEnvelope" } } },
+          }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate the refresh token and get a new access token
+      operationId: refresh
+      parameters: [{ $ref: "#/components/parameters/XRequestedWith" }]
+      security: [{ refreshCookie: [] }]
+      responses:
+        "200":
+          {
+            description: New session,
+            content:
+              { application/json: { schema: { $ref: "#/components/schemas/AuthEnvelope" } } },
+          }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: End the session and clear the cookie
+      operationId: logout
+      parameters: [{ $ref: "#/components/parameters/XRequestedWith" }]
+      security: [{ refreshCookie: [] }]
+      responses:
+        "204": { description: Signed out }
+        "403": { $ref: "#/components/responses/Error" }
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: The signed-in user
+      operationId: me
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          {
+            description: Current user,
+            content:
+              { application/json: { schema: { $ref: "#/components/schemas/UserEnvelope" } } },
+          }
+        "401": { $ref: "#/components/responses/Error" }
+  /admin/inquiries:
+    get:
+      tags: [Admin]
+      summary: List inquiries (summaries, no message body)
+      operationId: listInquiries
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: page, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+        - {
+            name: size,
+            in: query,
+            schema: { type: integer, minimum: 1, maximum: 100, default: 20 },
+          }
+        - { name: kind, in: query, schema: { $ref: "#/components/schemas/InquiryKind" } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/InquiryStatus" } }
+        - {
+            name: q,
+            in: query,
+            description: Prefix match on name or email,
+            schema: { type: string, maxLength: 100 },
+          }
+        - {
+            name: sort,
+            in: query,
+            schema:
+              { type: string, enum: [createdAt, name, email, status, kind], default: createdAt },
+          }
+        - { name: direction, in: query, schema: { type: string, enum: [asc, desc], default: desc } }
+      responses:
+        "200":
+          {
+            description: A page of inquiries,
+            content:
+              { application/json: { schema: { $ref: "#/components/schemas/PageEnvelope" } } },
+          }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Error" }
+  /admin/inquiries/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Admin]
+      summary: One inquiry including its message
+      operationId: getInquiry
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          {
+            description: The inquiry,
+            content:
+              { application/json: { schema: { $ref: "#/components/schemas/DetailEnvelope" } } },
+          }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [Admin]
+      summary: Permanently delete an inquiry (ADMIN only, audited)
+      operationId: deleteInquiry
+      security: [{ bearerAuth: [] }]
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /admin/inquiries/{id}/status:
+    patch:
+      tags: [Admin]
+      summary: Change an inquiry's status (audited)
+      description: Send the `version` you last read to detect concurrent edits; a stale version returns 409.
+      operationId: updateInquiryStatus
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StatusUpdate" }
+      responses:
+        "200":
+          {
+            description: Updated inquiry,
+            content:
+              { application/json: { schema: { $ref: "#/components/schemas/DetailEnvelope" } } },
+          }
+        "400": { $ref: "#/components/responses/ValidationFailed" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+    refreshCookie: { type: apiKey, in: cookie, name: epam_rt }
+  parameters:
+    XRequestedWith:
+      name: X-Requested-With
+      in: header
+      required: true
+      description: Must be `XMLHttpRequest`. A cross-site form cannot set it, which blocks CSRF on cookie endpoints.
+      schema: { type: string, enum: [XMLHttpRequest] }
+  responses:
+    Error:
+      {
+        description: Error,
+        content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } },
+      }
+    ValidationFailed:
+      {
+        description: Invalid input (per-field details),
+        content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } },
+      }
+    RateLimited:
+      description: Too many requests; see Retry-After
+      headers:
+        { Retry-After: { schema: { type: integer }, description: Seconds until the limit resets } }
+      content: { application/json: { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } }
+  schemas:
+    InquiryKind: { type: string, enum: [contact, partner, support] }
+    InquiryStatus: { type: string, enum: [new, in_progress, resolved, spam] }
+    ErrorCode:
+      type: string
+      enum:
+        [
+          VALIDATION_FAILED,
+          MALFORMED_REQUEST,
+          UNAUTHENTICATED,
+          INVALID_CREDENTIALS,
+          INVALID_REFRESH_TOKEN,
+          ACCESS_DENIED,
+          NOT_FOUND,
+          CONFLICT,
+          PAYLOAD_TOO_LARGE,
+          UNSUPPORTED_MEDIA_TYPE,
+          RATE_LIMITED,
+          ACCOUNT_LOCKED,
+          SERVICE_UNAVAILABLE,
+          INTERNAL_ERROR,
+        ]
+    Envelope:
+      type: object
+      required: [success, requestId, timestamp]
+      properties:
+        success: { type: boolean }
+        requestId: { type: string }
+        timestamp: { type: string, format: date-time }
+    ErrorEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [error]
+          properties:
+            error:
+              type: object
+              required: [code, message]
+              properties:
+                code: { $ref: "#/components/schemas/ErrorCode" }
+                message: { type: string }
+                details:
+                  type: array
+                  items:
+                    type: object
+                    required: [field, message]
+                    properties: { field: { type: string }, message: { type: string } }
+    SubmitInquiry:
+      type: object
+      additionalProperties: false
+      required: [name, email, message]
+      properties:
+        kind: { $ref: "#/components/schemas/InquiryKind" }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        email: { type: string, format: email, maxLength: 255 }
+        organization: { type: string, nullable: true, maxLength: 200 }
+        message: { type: string, minLength: 1, maxLength: 3000 }
+        website:
+          {
+            type: string,
+            maxLength: 500,
+            description: Honeypot. Leave empty; bots that fill it are silently discarded.,
+          }
+    Receipt:
+      type: object
+      required: [id, receivedAt]
+      properties:
+        { id: { type: string, format: uuid }, receivedAt: { type: string, format: date-time } }
+    ReceiptEnvelope:
+      allOf:
+        [
+          { $ref: "#/components/schemas/Envelope" },
+          { type: object, properties: { data: { $ref: "#/components/schemas/Receipt" } } },
+        ]
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        {
+          email: { type: string, format: email },
+          password: { type: string, minLength: 1, maxLength: 128 },
+        }
+    User:
+      type: object
+      required: [id, email, fullName, role]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        fullName: { type: string }
+        role: { type: string, enum: [ADMIN, STAFF] }
+    UserEnvelope:
+      allOf:
+        [
+          { $ref: "#/components/schemas/Envelope" },
+          { type: object, properties: { data: { $ref: "#/components/schemas/User" } } },
+        ]
+    AuthResponse:
+      type: object
+      required: [accessToken, tokenType, expiresIn, user]
+      properties:
+        accessToken: { type: string }
+        tokenType: { type: string, enum: [Bearer] }
+        expiresIn: { type: integer, description: Seconds }
+        user: { $ref: "#/components/schemas/User" }
+    AuthEnvelope:
+      allOf:
+        [
+          { $ref: "#/components/schemas/Envelope" },
+          { type: object, properties: { data: { $ref: "#/components/schemas/AuthResponse" } } },
+        ]
+    InquirySummary:
+      type: object
+      required: [id, kind, status, name, email, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { $ref: "#/components/schemas/InquiryKind" }
+        status: { $ref: "#/components/schemas/InquiryStatus" }
+        name: { type: string }
+        email: { type: string }
+        organization: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+    InquiryDetail:
+      allOf:
+        - $ref: "#/components/schemas/InquirySummary"
+        - type: object
+          required: [message, updatedAt, version]
+          properties:
+            message: { type: string }
+            updatedAt: { type: string, format: date-time }
+            updatedBy: { type: string, nullable: true }
+            version: { type: integer }
+    DetailEnvelope:
+      allOf:
+        [
+          { $ref: "#/components/schemas/Envelope" },
+          { type: object, properties: { data: { $ref: "#/components/schemas/InquiryDetail" } } },
+        ]
+    Page:
+      type: object
+      required: [items, page, size, totalElements, totalPages, last]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/InquirySummary" } }
+        page: { type: integer }
+        size: { type: integer }
+        totalElements: { type: integer }
+        totalPages: { type: integer }
+        last: { type: boolean }
+    PageEnvelope:
+      allOf:
+        [
+          { $ref: "#/components/schemas/Envelope" },
+          { type: object, properties: { data: { $ref: "#/components/schemas/Page" } } },
+        ]
+    StatusUpdate:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        {
+          status: { $ref: "#/components/schemas/InquiryStatus" },
+          version: { type: integer, minimum: 0 },
+        }

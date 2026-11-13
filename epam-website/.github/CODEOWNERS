@@ -1,0 +1,6 @@
+# Replace @your-org/maintainers with your GitHub team or username. Owners are asked to review matching changes.
+*                         @your-org/maintainers
+/src/server/              @your-org/maintainers
+/.github/                 @your-org/maintainers
+/deploy/                  @your-org/maintainers
+/docs/openapi.yaml        @your-org/maintainers
