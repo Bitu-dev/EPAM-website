@@ -1,0 +1,50 @@
+name: Deploy
+# Manual, approval-gated deploy to the single production server (Docker Compose over SSH).
+# Required environment "production" secrets: DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY, DEPLOY_PATH, SITE_URL
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref (tag or commit SHA) to deploy
+        required: true
+concurrency: production
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 20
+    steps:
+      - name: Configure SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+      - name: Deploy (with automatic rollback)
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          ssh -i ~/.ssh/id_deploy "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" bash -se <<'REMOTE'
+            set -euo pipefail
+            cd "${{ secrets.DEPLOY_PATH }}"
+            PREV=$(git rev-parse HEAD)
+            echo "$PREV" > .previous-release
+            git fetch --tags origin
+            git checkout --detach "$REF"
+            docker compose up -d --build --remove-orphans
+          REMOTE
+      - name: Smoke test (rolls back on failure)
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS "${{ secrets.SITE_URL }}/readyz" | grep -q ready; then ok=1; break; fi
+            sleep 5
+          done
+          if [ -z "${ok:-}" ]; then
+            ssh -i ~/.ssh/id_deploy "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+              "cd '${{ secrets.DEPLOY_PATH }}' && git checkout --detach \$(cat .previous-release) && docker compose up -d --build"
+            echo "::error::Smoke test failed; rolled back to previous release"; exit 1
+          fi
+          curl -fsSI "${{ secrets.SITE_URL }}/" | grep -i strict-transport-security
+          echo "Deployed ${{ inputs.ref }}"
